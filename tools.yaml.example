@@ -1,0 +1,249 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Copy this file to tools.yaml and configure with your database details
+
+sources:
+  mysql-source:
+    kind: mysql
+    host: localhost
+    port: 3306
+    database: ${MYSQL_DATABASE}
+    user: ${MYSQL_USER}
+    password: ${MYSQL_PASSWORD}
+    queryTimeout: 30s
+
+tools:
+  # DB Connection Check
+  db_connection_check:
+    kind: mysql-sql
+    source: mysql-source
+    description: "Check whether the DB of the operator's system is connected normally. This tool verifies database connectivity and returns connection status information. You can specify which database to connect to."
+    statement: |
+      SELECT 
+        CONNECTION_ID() as connection_id,
+        '{{.database_name}}' as database_name,
+        (SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{{.database_name}}') as database_exists,
+        USER() as user_name,
+        VERSION() as mysql_version,
+        NOW() as server_time,
+        CASE 
+          WHEN (SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '{{.database_name}}') IS NOT NULL 
+          THEN 'Connected' 
+          ELSE 'Database not found' 
+        END as status;
+    templateParameters:
+      - name: database_name
+        type: string
+        description: "Name of the database to check connection"
+        required: false
+        default: "your_database_name"
+
+  # Execute the tool
+  db_run_query:
+    kind: mysql-execute-sql
+    source: mysql-source
+    description: "This function allows the user to execute a SQL query against a selected database connection through the AI agent."
+
+  # DB Query Response Time Check/Slow Query Navigation
+  db_check_response_time:
+    kind: mysql-sql
+    source: mysql-source
+    description: "This function allows the user to measure the execution time of database queries and identify slow-running queries."
+    statement: |
+      SELECT 
+        query_time,
+        lock_time,
+        rows_sent,
+        rows_examined,
+        sql_text,
+        start_time
+      FROM mysql.slow_log
+      WHERE query_time > {{.threshold_seconds}}
+      ORDER BY query_time DESC
+      LIMIT {{.limit}};
+    templateParameters:
+      - name: database_name
+        type: string
+        description: "Name of the database to check"
+        required: false
+        default: "your_database_name"
+      - name: threshold_seconds
+        type: integer
+        description: "Minimum query execution time in seconds to consider as slow"
+        required: false
+        default: "1"
+      - name: limit
+        type: integer
+        description: "Maximum number of slow queries to return"
+        required: false
+        default: "10"
+
+  # DB DeadLock Check
+  db_check_deadlock:
+    kind: mysql-sql
+    source: mysql-source
+    description: |
+      This function allows the user to detect active deadlocks or blocking sessions in the database.
+      Example of prompt:
+      - "Check if there are any deadlocks in the DB right now."
+      - "Show blocking sessions and deadlock chains."
+    statement: |
+      SELECT 
+        r.trx_id AS waiting_trx_id,
+        r.trx_mysql_thread_id AS waiting_thread,
+        r.trx_query AS waiting_query,
+        r.trx_state AS waiting_state,
+        r.trx_wait_started AS wait_started,
+        TIMESTAMPDIFF(SECOND, r.trx_wait_started, NOW()) AS wait_age_seconds,
+        b.trx_id AS blocking_trx_id,
+        b.trx_mysql_thread_id AS blocking_thread,
+        b.trx_query AS blocking_query,
+        b.trx_state AS blocking_state,
+        w.requesting_engine_lock_id,
+        w.blocking_engine_lock_id
+      FROM performance_schema.data_lock_waits w
+      INNER JOIN information_schema.innodb_trx b ON b.trx_id = w.blocking_engine_transaction_id
+      INNER JOIN information_schema.innodb_trx r ON r.trx_id = w.requesting_engine_transaction_id
+      ORDER BY wait_age_seconds DESC;
+    templateParameters:
+      - name: database_name
+        type: string
+        description: "Name of the database to check"
+        required: false
+        default: "your_database_name"
+
+  # DB File Size
+  db_check_file_size:
+    kind: mysql-sql
+    source: mysql-source
+    description: |
+      This function allows the user to retrieve database file size, storage usage, and growth details. 
+      The agent queries DB metadata to show current capacity, space consumption trends, and potential storage risks.
+      Example of prompt:
+      - "Show DB file size and remaining capacity."
+      - "Check tablespace usage for member database."
+    statement: |
+      SELECT 
+        '{{.database_name}}' AS 'Database',
+        ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS 'Size (MB)',
+        ROUND(SUM(data_free) / 1024 / 1024, 2) AS 'Free Space (MB)',
+        ROUND((SUM(data_length + index_length) / 1024 / 1024 / 1024), 2) AS 'Size (GB)'
+      FROM information_schema.tables
+      WHERE table_schema = '{{.database_name}}'
+      GROUP BY table_schema;
+    templateParameters:
+      - name: database_name
+        type: string
+        description: "Name of the database to check size for"
+        required: false
+        default: "your_database_name"
+
+  # Check the I/F Data
+  db_check_if_data:
+    kind: mysql-sql
+    source: mysql-source
+    description: |
+      This function allows the user to verify interface (I/F) data by querying relevant interface tables 
+      to ensure that data has been received, processed, or transferred correctly across systems.
+      Example of prompt:
+      - "Check today's interface data for the HR system."
+      - "Show me I/F records that failed in the last 1 hour."
+      - "Verify if new policy data arrived in the interface table."
+      - "Is there any I/F data stuck in PENDING status?"
+    statement: |
+      SELECT *
+      FROM {{.interface_table}}
+      {{if .filter_condition}}WHERE {{.filter_condition}}{{end}}
+      {{if .order_column}}ORDER BY {{.order_column}} DESC{{end}}
+      LIMIT {{.limit}};
+    templateParameters:
+      - name: database_name
+        type: string
+        description: "Name of the database to query"
+        required: false
+        default: "your_database_name"
+      - name: interface_table
+        type: string
+        description: "Name of the interface table to query"
+        required: true
+      - name: filter_condition
+        type: string
+        description: 'SQL WHERE condition to filter interface data (e.g., status = "FAILED")'
+        required: false
+        default: ""
+      - name: order_column
+        type: string
+        description: "Column to order results by (e.g., created_at, id, access_time)"
+        required: false
+        default: ""
+      - name: limit
+        type: integer
+        description: "Maximum number of records to return"
+        required: false
+        default: "100"
+
+  # Checking Batch Data
+  db_check_batch_data:
+    kind: mysql-sql
+    source: mysql-source
+    description: |
+      This function allows the user to check batch processing results by running diagnostic queries 
+      against batch job tables. The agent identifies successes, failures, pending jobs, and error logs.
+      Example prompt:
+      - "Check the results of last night's batch jobs."
+      - "Show me failed batch records for the premium calculation batch."
+      - "Did the membership sync batch complete successfully today?"
+      - "List all batch jobs that are still running or delayed."
+    statement: |
+      SELECT *
+      FROM {{.batch_table}}
+      {{if .filter_condition}}WHERE {{.filter_condition}}{{end}}
+      {{if .order_column}}ORDER BY {{.order_column}} DESC{{end}}
+      LIMIT {{.limit}};
+    templateParameters:
+      - name: database_name
+        type: string
+        description: "Name of the database to query"
+        required: false
+        default: "your_database_name"
+      - name: batch_table
+        type: string
+        description: "Name of the batch job or batch data table"
+        required: true
+      - name: filter_condition
+        type: string
+        description: 'SQL WHERE condition to filter batch data (e.g., status = "FAILED")'
+        required: false
+        default: ""
+      - name: order_column
+        type: string
+        description: "Column to order results by (e.g., created_at, task_id, batch_date)"
+        required: false
+        default: ""
+      - name: limit
+        type: integer
+        description: "Maximum number of records to return"
+        required: false
+        default: "100"
+
+toolsets:
+  mysql_custom_tools:
+    - db_connection_check
+    - db_run_query
+    - db_check_response_time
+    - db_check_deadlock
+    - db_check_file_size
+    - db_check_if_data
+    - db_check_batch_data

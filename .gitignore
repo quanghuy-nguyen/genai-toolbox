@@ -1,0 +1,35 @@
+# direnv
+.envrc
+
+# vscode
+.vscode/
+
+# idea
+.idea/
+
+# npm
+node_modules
+
+# hugo
+.hugo/public/
+.hugo/resources/_gen
+.hugo_build.lock
+
+# coverage
+.coverage
+
+# executable
+genai-toolbox
+toolbox
+toolbox-binary
+
+# sensitive configuration files (do not commit)
+.env
+
+# logs
+*.log
+nohup.out
+
+# test files
+tools_test.yaml
+tools.yaml.backup
